@@ -3,10 +3,12 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	_ "github.com/lib/pq"
@@ -21,9 +23,9 @@ type Task struct {
 }
 
 var (
-	db *sql.DB
+	db          *sql.DB
 	memoryTasks []Task
-	nextID = 1
+	nextID      = 1
 )
 
 func init() {
@@ -64,6 +66,25 @@ func createTable() error {
 	`
 	_, err := db.Exec(query)
 	return err
+}
+
+func taskChanges(before, after Task) string {
+	changes := make([]string, 0, 3)
+
+	if before.Title != after.Title {
+		changes = append(changes, fmt.Sprintf("title:%q->%q", before.Title, after.Title))
+	}
+	if before.Done != after.Done {
+		changes = append(changes, fmt.Sprintf("done:%t->%t", before.Done, after.Done))
+	}
+	if before.Priority != after.Priority {
+		changes = append(changes, fmt.Sprintf("priority:%q->%q", before.Priority, after.Priority))
+	}
+
+	if len(changes) == 0 {
+		return "none"
+	}
+	return strings.Join(changes, ", ")
 }
 
 func getTasks(w http.ResponseWriter, r *http.Request) {
@@ -139,6 +160,8 @@ func createTask(w http.ResponseWriter, r *http.Request) {
 		memoryTasks = append(memoryTasks, t)
 	}
 
+	log.Printf("task created id=%d title=%q priority=%q done=%t", t.ID, t.Title, t.Priority, t.Done)
+
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(t)
 }
@@ -158,16 +181,42 @@ func updateTask(w http.ResponseWriter, r *http.Request) {
 		Priority *string `json:"priority"`
 	}
 
-	json.NewDecoder(r.Body).Decode(&body)
+	if err = json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	var before Task
+	err = db.QueryRow(
+		"SELECT id, title, done, priority, created_at FROM tasks WHERE id = $1",
+		id,
+	).Scan(&before.ID, &before.Title, &before.Done, &before.Priority, &before.CreatedAt)
+	if err == sql.ErrNoRows {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
 
 	if body.Title != nil {
-		db.Exec("UPDATE tasks SET title = $1 WHERE id = $2", *body.Title, id)
+		if _, err = db.Exec("UPDATE tasks SET title = $1 WHERE id = $2", *body.Title, id); err != nil {
+			http.Error(w, "update error", http.StatusInternalServerError)
+			return
+		}
 	}
 	if body.Done != nil {
-		db.Exec("UPDATE tasks SET done = $1 WHERE id = $2", *body.Done, id)
+		if _, err = db.Exec("UPDATE tasks SET done = $1 WHERE id = $2", *body.Done, id); err != nil {
+			http.Error(w, "update error", http.StatusInternalServerError)
+			return
+		}
 	}
 	if body.Priority != nil {
-		db.Exec("UPDATE tasks SET priority = $1 WHERE id = $2", *body.Priority, id)
+		if _, err = db.Exec("UPDATE tasks SET priority = $1 WHERE id = $2", *body.Priority, id); err != nil {
+			http.Error(w, "update error", http.StatusInternalServerError)
+			return
+		}
 	}
 
 	var t Task
@@ -185,6 +234,8 @@ func updateTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	log.Printf("task updated id=%d changes=%s", t.ID, taskChanges(before, t))
+
 	json.NewEncoder(w).Encode(t)
 }
 
@@ -195,6 +246,20 @@ func deleteTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var taskToDelete Task
+	err = db.QueryRow(
+		"SELECT id, title, done, priority, created_at FROM tasks WHERE id = $1",
+		id,
+	).Scan(&taskToDelete.ID, &taskToDelete.Title, &taskToDelete.Done, &taskToDelete.Priority, &taskToDelete.CreatedAt)
+	if err == sql.ErrNoRows {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+
 	result, err := db.Exec("DELETE FROM tasks WHERE id = $1", id)
 	if err != nil {
 		http.Error(w, "delete error", http.StatusInternalServerError)
@@ -202,10 +267,16 @@ func deleteTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	affected, err := result.RowsAffected()
+	if err != nil {
+		http.Error(w, "delete error", http.StatusInternalServerError)
+		return
+	}
 	if affected == 0 {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
+
+	log.Printf("task deleted id=%d title=%q priority=%q done=%t", taskToDelete.ID, taskToDelete.Title, taskToDelete.Priority, taskToDelete.Done)
 
 	w.WriteHeader(http.StatusNoContent)
 }

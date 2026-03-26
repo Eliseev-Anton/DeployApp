@@ -1,0 +1,35 @@
+services:
+  app:
+    build:
+      context: . # файлы которые берем в билд
+      dockerfile: Dockerfile # докер файл который будем использовать
+    ports:
+      - "8000:8000" # прокидываем с хоста на порт контейнера для доступа. Внешний + внутринний
+    environment:
+      DATABASE_URL: postgres://appuser:apppass@db:5432/appdb?sslmode=disable # адресс базы данных
+    depends_on: #
+      db: #
+        condition: service_healthy # стартуем только после ого запустили контейнер БД после healthcheck
+    restart: unless-stopped # работает пока не оставим сами
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: appuser
+      POSTGRES_PASSWORD: apppass
+      POSTGRES_DB: appdb
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U appuser -d appdb"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+  adminer:
+    image: adminer
+    ports:
+      - "8001:8080"
+    profiles: ["debug"]
+volumes:
+  pgdata:

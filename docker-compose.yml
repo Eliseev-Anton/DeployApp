@@ -1,35 +1,86 @@
 services:
   app:
-    build:
-      context: . # файлы которые берем в билд
-      dockerfile: Dockerfile # докер файл который будем использовать
+    image: my-backend
+    restart: unless-stopped
+    user: "1000:1000"
+    read_only: true
+    tmpfs:
+      - /tmp
     ports:
-      - "8000:8000" # прокидываем с хоста на порт контейнера для доступа. Внешний + внутринний
+      - "8000:8000"
     environment:
-      DATABASE_URL: postgres://appuser:apppass@db:5432/appdb?sslmode=disable # адресс базы данных
-    depends_on: #
-      db: #
-        condition: service_healthy # стартуем только после ого запустили контейнер БД после healthcheck
-    restart: unless-stopped # работает пока не оставим сами
+      DATABASE_URL: postgres://appuser:apppass@db:5432/appdb?sslmode=disable
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 40s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - frontend
+      - backend
+
   db:
     image: postgres:16-alpine
-    environment:
-      POSTGRES_USER: appuser
-      POSTGRES_PASSWORD: apppass
-      POSTGRES_DB: appdb
+    restart: unless-stopped
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    environment:
+      POSTGRES_USER: ${DB_USER:-user}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME:-name}
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U appuser -d appdb"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER}"]
       interval: 5s
-      timeout: 3s
-      retries: 10
-    restart: unless-stopped
-  adminer:
-    image: adminer
-    ports:
-      - "8001:8080"
-    profiles: ["debug"]
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+    networks:
+      - backend
+
+  backup:
+    image: postgres:16-alpine
+    profiles:
+      - maintenance
+    command: >
+      sh -c 'pg_dump -h db -U ${DB_USER} ${DB_NAME} > /backups/backup_$$(date +%Y%m%d_%H%M%S).sql'
+    environment:
+      PGPASSWORD: ${DB_PASSWORD}
+    volumes:
+      - ./backups:/backups
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - backend
+
+networks:
+  frontend:
+    driver: bridge
+  backend:
+    driver: bridge
+    internal: true
+
 volumes:
   pgdata:
+    driver: local

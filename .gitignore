@@ -1,0 +1,10 @@
+.env
+.env.*
+!.env.example
+
+secrets/
+
+*.log
+*.out
+
+.DS_Store
